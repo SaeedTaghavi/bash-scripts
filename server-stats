@@ -1,0 +1,217 @@
+#!/bin/bash
+
+# --- server-stats.sh ---
+# This script analyzes and displays basic server performance statistics
+# on a Linux system. It provides insights into CPU, memory, disk usage,
+# and identifies top processes consuming resources.
+
+# --- Configuration ---
+# Define colors for better readability (optional)
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# --- Functions to collect stats ---
+
+# Function to display a section header
+print_header() {
+    echo -e "\n${BLUE}--- $1 ---${NC}"
+    echo "-----------------------------------"
+}
+
+# 1. Get OS Version
+get_os_version() {
+    print_header "Operating System Information"
+    if [ -f /etc/os-release ]; then
+        grep PRETTY_NAME /etc/os-release | cut -d'=' -f2 | tr -d '"'
+    elif [ -f /etc/lsb-release ]; then
+        grep DISTRIB_DESCRIPTION /etc/lsb-release | cut -d'=' -f2 | tr -d '"'
+    elif [ -f /etc/redhat-release ]; then
+        cat /etc/redhat-release
+    else
+        uname -a
+    fi
+}
+
+# 2. Get Uptime
+get_uptime() {
+    print_header "System Uptime"
+    uptime -p
+}
+
+# 3. Get Load Average
+get_load_average() {
+    print_header "Load Average (1, 5, 15 minutes)"
+    uptime | awk -F'load average:' '{print $2}'
+}
+
+# 4. Get Total CPU Usage
+get_cpu_usage() {
+    print_header "CPU Usage"
+    # Using 'mpstat' for more detailed CPU stats if available, otherwise 'top'
+    if command -v mpstat &> /dev/null; then
+        # mpstat -u 1 1 gives average CPU utilization for 1 second
+        # The output is parsed to get %idle and then calculate %usage
+        CPU_IDLE=$(mpstat -u 1 1 | awk '/Average:/ {print $NF}')
+        if [ -n "$CPU_IDLE" ]; then
+            CPU_USAGE=$(awk "BEGIN {print 100 - $CPU_IDLE}")
+            echo -e "Total CPU Usage: ${YELLOW}${CPU_USAGE}%${NC}"
+        else
+            echo "Could not determine CPU usage using mpstat."
+        fi
+    else
+        # Fallback to 'top' if mpstat is not installed
+        # Grab the CPU line, then extract the idle percentage (id) and subtract from 100
+        CPU_LINE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%*id.*/\1/" | awk '{print 100 - $1}')
+        echo -e "Total CPU Usage: ${YELLOW}${CPU_LINE}%${NC}"
+    fi
+}
+
+# 5. Get Total Memory Usage
+get_memory_usage() {
+    print_header "Memory Usage"
+    # Try using 'free -h' first for human-readable output
+    if command -v free &> /dev/null; then
+        MEM_INFO=$(free -h | awk '/Mem:/ {print $2, $3, $4}')
+        TOTAL_MEM=$(echo "$MEM_INFO" | awk '{print $1}')
+        USED_MEM=$(echo "$MEM_INFO" | awk '{print $2}')
+        FREE_MEM=$(echo "$MEM_INFO" | awk '{print $3}')
+
+        TOTAL_BYTES=$(free -b | awk '/Mem:/ {print $2}')
+        USED_BYTES=$(free -b | awk '/Mem:/ {print $3}')
+    elif [ -f /proc/meminfo ]; then
+        # Fallback to /proc/meminfo if 'free' command is not available
+        TOTAL_BYTES=$(awk '/MemTotal:/ {print $2}' /proc/meminfo) # in KB
+        FREE_BYTES=$(awk '/MemFree:/ {print $2}' /proc/meminfo)   # in KB
+        BUFFERS_BYTES=$(awk '/Buffers:/ {print $2}' /proc/meminfo) # in KB
+        CACHED_BYTES=$(awk '/Cached:/ {print $2}' /proc/meminfo)   # in KB
+
+        # Calculate used memory (Total - Free - Buffers - Cached)
+        USED_BYTES=$((TOTAL_BYTES - FREE_BYTES - BUFFERS_BYTES - CACHED_BYTES))
+
+        # Convert to human-readable format (MB or GB)
+        TOTAL_MEM=$(echo "scale=2; $TOTAL_BYTES / 1024 / 1024" | bc) # GB
+        USED_MEM=$(echo "scale=2; $USED_BYTES / 1024 / 1024" | bc)   # GB
+        FREE_MEM=$(echo "scale=2; $FREE_BYTES / 1024 / 1024" | bc)   # GB
+
+        TOTAL_MEM="${TOTAL_MEM}G"
+        USED_MEM="${USED_MEM}G"
+        FREE_MEM="${FREE_MEM}G"
+
+    else
+        echo "Could not determine memory usage. Neither 'free' command nor /proc/meminfo found."
+        return
+    fi
+
+    if [ "$TOTAL_BYTES" -gt 0 ]; then
+        MEM_PERCENT=$(awk "BEGIN {printf \"%.2f\", ($USED_BYTES / $TOTAL_BYTES) * 100}")
+    else
+        MEM_PERCENT="0.00"
+    fi
+
+    echo -e "Total Memory: ${TOTAL_MEM}"
+    echo -e "Used Memory: ${USED_MEM} (${YELLOW}${MEM_PERCENT}%${NC})"
+    echo -e "Free Memory: ${FREE_MEM}"
+}
+
+# 6. Get Total Disk Usage
+get_disk_usage() {
+    print_header "Disk Usage"
+    # Using 'df -h' for human-readable output, focusing on root partition or major mounts
+    # Exclude snap/loop devices and temporary filesystems
+    df -h --exclude-type=squashfs --exclude-type=tmpfs --exclude-type=devtmpfs | grep -E '^/dev/' | \
+    awk '
+    BEGIN {
+        total_size=0; total_used=0; total_avail=0;
+        print "Filesystem\tSize\tUsed\tAvail\tUse%\tMounted on"
+    }
+    {
+        # Convert sizes to bytes for accurate calculation
+        size_bytes = $2;
+        if (substr(size_bytes, length(size_bytes)) == "G") { size_bytes = substr(size_bytes, 1, length(size_bytes)-1) * 1024*1024*1024 }
+        else if (substr(size_bytes, length(size_bytes)) == "M") { size_bytes = substr(size_bytes, 1, length(size_bytes)-1) * 1024*1024 }
+        else if (substr(size_bytes, length(size_bytes)) == "K") { size_bytes = substr(size_bytes, 1, length(size_bytes)-1) * 1024 }
+
+        used_bytes = $3;
+        if (substr(used_bytes, length(used_bytes)) == "G") { used_bytes = substr(used_bytes, 1, length(used_bytes)-1) * 1024*1024*1024 }
+        else if (substr(used_bytes, length(used_bytes)) == "M") { used_bytes = substr(used_bytes, 1, length(used_bytes)-1) * 1024*1024 }
+        else if (substr(used_bytes, length(used_bytes)) == "K") { used_bytes = substr(used_bytes, 1, length(used_bytes)-1) * 1024 }
+
+        avail_bytes = $4;
+        if (substr(avail_bytes, length(avail_bytes)) == "G") { avail_bytes = substr(avail_bytes, 1, length(avail_bytes)-1) * 1024*1024*1024 }
+        else if (substr(avail_bytes, length(avail_bytes)) == "M") { avail_bytes = substr(avail_bytes, 1, length(avail_bytes)-1) * 1024*1024 }
+        else if (substr(avail_bytes, length(avail_bytes)) == "K") { avail_bytes = substr(avail_bytes, 1, length(avail_bytes)-1) * 1024 }
+
+        total_size += size_bytes;
+        total_used += used_bytes;
+        total_avail += avail_bytes;
+
+        print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6
+    }
+    END {
+        if (total_size > 0) {
+            total_used_percent = (total_used / total_size) * 100;
+        } else {
+            total_used_percent = 0;
+        }
+        print "-----------------------------------"
+        print "Overall Disk Usage:"
+        printf "Used: %.2fG (%.2f%%)\n", total_used / (1024*1024*1024), total_used_percent
+        printf "Free: %.2fG\n", total_avail / (1024*1024*1024)
+    }'
+}
+
+
+# 7. Get Top 5 Processes by CPU Usage
+get_top_cpu_processes() {
+    print_header "Top 5 Processes by CPU Usage"
+    # Using 'ps aux' and sorting by %CPU, then piping to 'head -n 6' (header + 5 processes)
+    ps aux --sort=-%cpu | awk 'NR<=6 {print $1, $2, $3, $11}' | column -t
+}
+
+# 8. Get Top 5 Processes by Memory Usage
+get_top_memory_processes() {
+    print_header "Top 5 Processes by Memory Usage"
+    # Using 'ps aux' and sorting by %MEM, then piping to 'head -n 6' (header + 5 processes)
+    ps aux --sort=-%mem | awk 'NR<=6 {print $1, $2, $4, $11}' | column -t
+}
+
+# 9. Get Logged In Users
+get_logged_in_users() {
+    print_header "Logged In Users"
+    who
+}
+
+# 10. Get Failed Login Attempts (from auth.log or secure log)
+get_failed_login_attempts() {
+    print_header "Recent Failed Login Attempts"
+    # Check common log files for failed attempts
+    if [ -f /var/log/auth.log ]; then
+        grep "Failed password" /var/log/auth.log | tail -n 5
+    elif [ -f /var/log/secure ]; then
+        grep "Failed password" /var/log/secure | tail -n 5
+    else
+        echo "No common authentication log file found (/var/log/auth.log or /var/log/secure)."
+    fi
+}
+
+# --- Main Script Execution ---
+clear # Clear the terminal for a clean output
+
+echo -e "${GREEN}--- Server Performance Statistics ---${NC}"
+
+get_os_version
+get_uptime
+get_load_average
+get_cpu_usage
+get_memory_usage
+get_disk_usage
+get_top_cpu_processes
+get_top_memory_processes
+get_logged_in_users
+get_failed_login_attempts
+
+echo -e "\n${GREEN}--- Analysis Complete ---${NC}"
+echo "Generated on: $(date)"
