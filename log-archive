@@ -1,0 +1,96 @@
+#!/bin/bash
+
+# --- Log Archiving CLI Tool ---
+# This script compresses logs from a specified directory into a timestamped
+# .tar.gz archive and stores them in a dedicated archive directory.
+# It also logs the archiving event to a file.
+
+# --- Configuration ---
+# Default directory where archives will be stored.
+# You can change this path to your preferred archive location.
+ARCHIVE_BASE_DIR="/var/log/archives"
+
+# Log file for recording archive events.
+ARCHIVE_LOG_FILE="${ARCHIVE_BASE_DIR}/archive_events.log"
+
+# --- Functions ---
+
+# Function to display usage instructions.
+display_usage() {
+    echo "Usage: $0 <log_directory_to_archive>"
+    echo "Example: $0 /var/log/nginx"
+    echo "This tool compresses logs from the specified directory and stores them"
+    echo "in a new timestamped archive file within '${ARCHIVE_BASE_DIR}'."
+    exit 1
+}
+
+# Function to log archive events.
+log_event() {
+    local message="$1"
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - $message" >> "${ARCHIVE_LOG_FILE}"
+}
+
+# --- Script Logic ---
+
+# 1. Check if a log directory path is provided as an argument.
+if [ -z "$1" ]; then
+    echo "Error: No log directory provided."
+    display_usage
+fi
+
+# 2. Store the provided log directory path.
+LOG_DIR_TO_ARCHIVE="$1"
+
+# 3. Validate if the provided path is a valid directory.
+if [ ! -d "$LOG_DIR_TO_ARCHIVE" ]; then
+    echo "Error: Log directory '$LOG_DIR_TO_ARCHIVE' not found or is not a directory."
+    log_event "ERROR: Failed to archive '$LOG_DIR_TO_ARCHIVE' - Directory not found."
+    exit 1
+fi
+
+# 4. Create the base archive directory if it doesn't exist.
+if [ ! -d "$ARCHIVE_BASE_DIR" ]; then
+    echo "Creating archive directory: '$ARCHIVE_BASE_DIR'"
+    mkdir -p "$ARCHIVE_BASE_DIR"
+    if [ $? -ne 0 ]; then
+        echo "Error: Could not create archive directory '$ARCHIVE_BASE_DIR'. Check permissions."
+        log_event "ERROR: Could not create archive directory '$ARCHIVE_BASE_DIR'."
+        exit 1
+    fi
+fi
+
+# 5. Generate a timestamp for the archive filename.
+# Format: YYYYMMDD_HHMMSS (e.g., 20240816_100648)
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
+# 6. Extract the base name of the log directory for the archive filename.
+# E.g., if LOG_DIR_TO_ARCHIVE is /var/log/nginx, BASE_LOG_DIR_NAME will be nginx.
+BASE_LOG_DIR_NAME=$(basename "$LOG_DIR_TO_ARCHIVE")
+
+# 7. Construct the full archive filename.
+# Example: nginx_logs_archive_20240816_100648.tar.gz
+ARCHIVE_FILENAME="${BASE_LOG_DIR_NAME}_logs_archive_${TIMESTAMP}.tar.gz"
+ARCHIVE_FULL_PATH="${ARCHIVE_BASE_DIR}/${ARCHIVE_FILENAME}"
+
+# 8. Perform the compression and archiving using 'tar'.
+echo "--- Starting log archiving ---"
+echo "Source logs: '$LOG_DIR_TO_ARCHIVE'"
+echo "Destination archive: '$ARCHIVE_FULL_PATH'"
+
+# Use 'tar -C' to change directory before archiving, ensuring the archive
+# contains only the contents of the log directory, not the full path.
+tar -czf "$ARCHIVE_FULL_PATH" -C "$(dirname "$LOG_DIR_TO_ARCHIVE")" "$(basename "$LOG_DIR_TO_ARCHIVE")"
+
+# 9. Check the exit status of the 'tar' command.
+if [ $? -eq 0 ]; then
+    echo "--- Log archiving successful! ---"
+    echo "Archive created: '$ARCHIVE_FULL_PATH'"
+    log_event "SUCCESS: Archived '$LOG_DIR_TO_ARCHIVE' to '$ARCHIVE_FULL_PATH'."
+else
+    echo "--- Log archiving failed! ---"
+    echo "An error occurred during the archiving process."
+    log_event "ERROR: Failed to archive '$LOG_DIR_TO_ARCHIVE'."
+    exit 1
+fi
+
+exit 0 # Exit successfully
